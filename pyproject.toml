@@ -7,7 +7,16 @@ authors = [
     { name = "Mateusz Wojtaszek", email = "mateusz.wojtaszek@icloud.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "cellpose>=4.2,<5",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "pydantic-settings>=2.15.0",
+    "scikit-image>=0.26.0",
+    "shapely>=2.2.0",
+    "tifffile>=2026.9.20",
+    "torch>=2.8",
+]
 
 [project.scripts]
 histopathology-pnw = "histopathology_pnw:main"
@@ -19,4 +28,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "dvc[ssh]>=3.67.1",
+    "marimo>=0.25.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
 ]
