@@ -91,12 +91,28 @@ Requirements: [uv](https://docs.astral.sh/uv/), SSH access to WCSS.
    ```
 
 ### On WCSS itself
-- Point the remote at the local path instead of SSH-ing to the same machine. This only writes
-  to `.dvc/config.local`, which is not committed:
-  ```bash
-  uv run dvc remote modify --local wcss url /lustre/pd01/hpc-martinta-1783643755/mateusz/dvc-store
-  ```
-- Keep the repository and DVC cache on Lustre, not in `$HOME`.
+Storage layout (`$HOME`: 50 GB / 1M files quota, snapshot backups; `PD`: project space on Lustre):
+
+| What | Where | Why |
+|---|---|---|
+| Repository, `.venv`, uv cache | `$HOME` | uv hardlinks packages from its cache into `.venv`, which only works on one filesystem; the many small files of the environment stay out of the shared PD file limit |
+| DVC cache and remote | PD | data lives on Lustre; the repo only holds symlinks to it |
+| Checkpoints, runs, logs | PD, via per-machine config | never written into the repo directory on the cluster |
+
+DVC-tracked pipeline outputs (e.g. masks) stay under `data/` in the repo, because DVC 3 does not
+support outputs outside the repo. With symlink caching they are moved to the PD cache and only
+a symlink stays in `$HOME`.
+
+One-time setup (writes only to `.dvc/config.local`, which is not committed):
+```bash
+export PD=/lustre/pd01/hpc-martinta-1783643755   # put this in ~/.bashrc
+uv run dvc remote modify --local wcss url $PD/mateusz/dvc-store   # local path, no SSH to itself
+uv run dvc cache dir --local $PD/mateusz/dvc-cache
+uv run dvc config --local cache.type symlink   # hardlinks cannot cross from $HOME to PD
+uv run dvc pull
+```
+
+- Do not move `UV_CACHE_DIR` to PD: it would split the uv cache and `.venv` across filesystems.
 - Run `dvc pull` on the login node before `sbatch`. Compute nodes may not have network access.
 - Code reaches WCSS only through `git pull`. Do not edit code on the cluster.
 
