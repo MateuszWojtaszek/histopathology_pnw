@@ -1,0 +1,4 @@
+[core]
+    remote = wcss
+['remote "wcss"']
+    url = ssh://wcss/lustre/pd01/hpc-martinta-1783643755/mateusz/dvc-store

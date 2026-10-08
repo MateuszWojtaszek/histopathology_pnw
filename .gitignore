@@ -310,3 +310,19 @@ nohup.out
 # Built Visual Studio Code Extensions
 *.vsix
 
+
+### ===== Project =====
+# data/ is managed by DVC: ignore data contents, but keep DVC pointer files
+# (*.dvc) and the .gitignore files DVC writes, so raw data never reaches git before `dvc add`.
+/data/**
+!/data/**/
+!/data/**/*.dvc
+!/data/**/.gitignore
+/outputs/
+/runs/
+/checkpoints/
+*.pth
+*.pt
+*.ckpt
+wandb/
+mlruns/
