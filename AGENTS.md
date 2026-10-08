@@ -14,8 +14,13 @@ model replaces the pathologist as the annotator. Datasets will change over the p
 Not yet: AL loop, selectors, CAMELYON17.
 
 ## Models — never mix these up
-- **Oracle**: fully pretrained Cellpose-SAM from the Cellpose authors, frozen, inference only.
-  TODO(Mateusz): pin the exact model name (`cpsam` or `cpsam_v2`) and use only that one.
+- **Oracle**: fully pretrained Cellpose-SAM, model `cpsam` (original release, April 2025),
+  frozen, inference only. Weights are tracked with DVC at `models/oracle/cpsam`, downloaded
+  from huggingface.co/mouseland/cellpose-sam at commit 7c61431b5fbb078f3296754bd15d9f51b320f837
+  (SHA-256 `e1440429eb384f95afe32bcba6510f90d518eaedc917ede549bed6804004abe2`).
+  Always load it by this path and verify the SHA-256 first (a missing path silently falls back
+  to `cpsam_v2`; a wrong file loads without error). Never load it by name and never use
+  `cpsam_v2`, which is the Cellpose 4.2 default.
 - **Student**: Cellpose-SAM architecture whose encoder starts from the ORIGINAL SAM ViT-L
   weights, never trained on cell or histopathology images. Never initialise the student from
   any Cellpose checkpoint: that leaks training on other cell datasets into the student.

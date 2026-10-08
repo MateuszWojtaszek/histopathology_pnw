@@ -318,6 +318,11 @@ nohup.out
 !/data/**/
 !/data/**/*.dvc
 !/data/**/.gitignore
+# models/ (oracle and student-init weights) is managed by DVC in the same way.
+/models/**
+!/models/**/
+!/models/**/*.dvc
+!/models/**/.gitignore
 /outputs/
 /runs/
 /checkpoints/

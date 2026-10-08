@@ -22,18 +22,43 @@ The working checklist, with reading list, is in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Models
 
-| Role | Model | Weights | Trained here? |
+| Role | Model | Weights | Notes |
 |---|---|---|---|
-| **Oracle** | Cellpose-SAM | pretrained by the Cellpose authors (model name: _TBD — `cpsam` or `cpsam_v2`_) | no, frozen, inference only |
-| **Student** | Cellpose-SAM architecture (`cellpose.vit.CPSAM`) | original SAM ViT-L (`sam_vit_l_0b3195.pth`) | yes |
+| **Oracle** | Cellpose-SAM `cpsam` | `models/oracle/cpsam` (DVC) | frozen, inference only |
+| **Student** | Cellpose-SAM architecture (`cellpose.vit.CPSAM`) | encoder from original SAM ViT-L (`sam_vit_l_0b3195.pth`) | trained here; never initialised from a Cellpose checkpoint |
 
 The student never starts from a Cellpose checkpoint. Those checkpoints were trained on other cell
 datasets, so using them would leak that knowledge into the student and distort AL comparisons.
 
-Things to know about Cellpose 4.x:
-- An unknown model name does not raise an error: Cellpose logs a warning and loads `cpsam_v2`.
-  Always pass an explicit name or path, and treat that warning as an error.
-- Weights are loaded with `strict=False`. Always check the missing/unexpected keys.
+### Oracle weights
+
+Downloaded from [mouseland/cellpose-sam](https://huggingface.co/mouseland/cellpose-sam) at a fixed
+commit and tracked with DVC, so every machine uses byte-identical weights and WCSS compute nodes
+need no internet access:
+
+- commit: `7c61431b5fbb078f3296754bd15d9f51b320f837`
+- file: `cpsam`, 1 233 587 898 bytes
+- SHA-256: `e1440429eb384f95afe32bcba6510f90d518eaedc917ede549bed6804004abe2`
+
+### Why `cpsam` and not `cpsam_v2`
+
+Cellpose 4.2 ships two Cellpose-SAM checkpoints with the same SAM ViT-L backbone:
+
+- `cpsam` (April 2025) is the model described in the Cellpose-SAM paper, which documents
+  its training data.
+- `cpsam_v2` (June 2026) is the Cellpose 4.2 default. It "includes a fix in the training for
+  low contrast regions" and predicts fewer spurious masks there. Its training data is not
+  documented.
+
+We use `cpsam` because its training data is documented. This matters because that data
+includes MoNuSeg, so oracle scores on MoNuSeg are not independent, and we can only reason
+about such overlap for a model whose training set is known.
+
+### Things to know about Cellpose 4.x
+- A path that does not exist, or an unknown model name, does not raise an error: Cellpose logs
+  a warning and loads `cpsam_v2`. Always load the oracle by path and verify its SHA-256 first.
+- Any checkpoint without a DINO `cls_token` is treated as SAM ViT-L, and weights are loaded with
+  `strict=False`, so a wrong file loads silently. Check the missing/unexpected keys.
 
 ## Data
 
