@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "Mateusz Wojtaszek", email = "mateusz.wojtaszek@icloud.com" }
+    { name = "Mateusz Wojtaszek", email = "mateusz.wojtaszek@icloud.com" },
 ]
 requires-python = ">=3.13"
 dependencies = [
@@ -29,6 +29,68 @@ build-backend = "uv_build"
 dev = [
     "dvc[ssh]>=3.67.1",
     "marimo>=0.25.1",
+    "matplotlib>=3.11.2",
+    "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+# Same as Black.
+line-length = 100
+
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",   # pycodestyle: styl i błędy
+    "F",   # pyflakes: nieużywane importy i zmienne, niezdefiniowane nazwy
+    "I",   # sortowanie importów
+    "B",   # bugbear: typowe pułapki, np. mutowalne argumenty domyślne
+    "UP",  # nowoczesna składnia dla Pythona 3.13 (list zamiast typing.List)
+    "SIM", # uproszczenia
+    "NPY", # numpy, m.in. stare np.random.* zamiast Generatora
+    "PTH", # pathlib zamiast os.path
+    "RUF", # reguły samego ruffa
+]
+ignore = [
+    "E501",
+] # długość linii pilnuje formatter; długie napisy i komentarze są OK
+
+[tool.ruff.lint.per-file-ignores]
+# marimo: gołe wyrażenie na końcu komórki to sposób na wyświetlenie wyniku
+"notebooks/**/*.py" = ["B018"]
+
+[tool.ruff.format]
+docstring-code-format = true
