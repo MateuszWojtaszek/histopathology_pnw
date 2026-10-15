@@ -1,0 +1,5 @@
+outs:
+- md5: 0b3195507c641ddb6910d2bb5adee89c
+  size: 1249524607
+  hash: md5
+  path: sam_vit_l_0b3195.pth

@@ -1,7 +1,7 @@
 [project]
 name = "histopathology-pnw"
 version = "0.1.0"
-description = "Add your description here"
+description = "Active learning for nucleus instance segmentation in H&E histopathology (master's thesis, PWr)"
 readme = "README.md"
 authors = [
     { name = "Mateusz Wojtaszek", email = "mateusz.wojtaszek@icloud.com" },
@@ -28,12 +28,16 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "dvc[ssh]>=3.67.1",
-    "marimo>=0.25.1",
+    "ipykernel>=7.4.0",
     "matplotlib>=3.11.2",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
+    "ty>=0.0.85",
 ]
+
+[tool.pytest.ini_options]
+markers = ["slow: needs model weights (skipped when they are not pulled)"]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
@@ -89,8 +93,9 @@ ignore = [
 ] # długość linii pilnuje formatter; długie napisy i komentarze są OK
 
 [tool.ruff.lint.per-file-ignores]
-# marimo: gołe wyrażenie na końcu komórki to sposób na wyświetlenie wyniku
-"notebooks/**/*.py" = ["B018"]
+# notebooki: gołe wyrażenie na końcu komórki wyświetla wynik (B018),
+# a importy bywają w dalszych komórkach (E402)
+"notebooks/**" = ["B018", "E402"]
 
 [tool.ruff.format]
 docstring-code-format = true

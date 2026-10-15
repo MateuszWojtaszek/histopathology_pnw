@@ -1,0 +1,8 @@
+stages:
+  preprocess_monuseg:
+    cmd: uv run python -m histopathology_pnw.datasets.monuseg
+    deps:
+      - data/raw/monuseg
+      - src/histopathology_pnw/datasets/monuseg.py
+    outs:
+      - data/processed/monuseg

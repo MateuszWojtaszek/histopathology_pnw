@@ -24,14 +24,20 @@ Not yet: AL loop, selectors, CAMELYON17.
 - **Student**: Cellpose-SAM architecture whose encoder starts from the ORIGINAL SAM ViT-L
   weights, never trained on cell or histopathology images. Never initialise the student from
   any Cellpose checkpoint: that leaks training on other cell datasets into the student.
+  SAM weights are tracked with DVC at `models/student_init/sam_vit_l_0b3195.pth`, from
+  dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth (SHA-256
+  `3adcc4315b642a4d2101128f611684e8734c41232a17c648ed1693702a49a622`). Build the student with
+  `histopathology_pnw.models.student.build_student_init`.
 
 Cellpose 4.x facts (checked in cellpose 4.2.1.1):
 - `models.CellposeModel()` defaults to `pretrained_model="cpsam_v2"`.
 - An unknown model name does NOT fail: it logs a warning and silently loads `cpsam_v2`.
   Always pass an explicit, existing name or path, and treat that warning as an error.
-- `pretrained_model=None` raises ("training from scratch is not implemented"), so the
-  student is built from `cellpose.vit.CPSAM()` + `load_pretrained(root)`, which loads
-  `sam_vit_l_0b3195.pth`.
+- `pretrained_model=None` raises ("training from scratch is not implemented").
+- `CPSAM.load_pretrained()` is broken for this purpose: it replaces the adapted encoder with an
+  unmodified SAM encoder (16 px patches, 64x64 position embeddings). The student is built from
+  `CPSAM()` with the SAM encoder weights adapted as in `CPSAM.__init__` and loaded with
+  `strict=True` (`models/student.py`), then saved as a normal Cellpose checkpoint.
 - `BaseModel.load_model()` uses `strict=False`, so a wrong checkpoint loads without error.
   Check the missing/unexpected keys whenever weights are loaded.
 

@@ -10,15 +10,21 @@ a frozen pretrained model (the *oracle*) plays the role of the pathologist.
 
 ## Status
 
+Stage 1 (tasks from the supervisor): literature review, oracle inference with PQ metrics,
+type-1 fuzzy system, random-selection AL.
+
 | Area | State |
 |---|---|
-| Repository and environment (uv, DVC) | in progress |
-| MoNuSeg preprocessing (XML polygons → instance masks) | in progress |
-| Student training with Cellpose-SAM | in progress |
-| AL loop and selectors | not started |
+| Repository and environment (uv, DVC) | done |
+| MoNuSeg exploration and preprocessing (XML polygons → instance masks) | done (`notebooks/01`) |
+| I1: oracle inference and metrics (PQ, PQ@0.5) | code ready (`notebooks/02`) |
+| Type-1 fuzzy system | not started |
+| I3: student training with Cellpose-SAM, random-selection AL | code ready (`notebooks/03`) |
+| AL selectors (IT2 FLS, MC-Dropout, Coreset, VAAL) | not started |
 | CAMELYON17 | not started |
 
-The working checklist, with reading list, is in [`docs/PLAN.md`](docs/PLAN.md).
+The working checklist is in [`docs/PLAN.md`](docs/PLAN.md), the reading list (in Polish, in
+reading order) in [`docs/LITERATURA.md`](docs/LITERATURA.md).
 
 ## Models
 
@@ -26,6 +32,13 @@ The working checklist, with reading list, is in [`docs/PLAN.md`](docs/PLAN.md).
 |---|---|---|---|
 | **Oracle** | Cellpose-SAM `cpsam` | `models/oracle/cpsam` (DVC) | frozen, inference only |
 | **Student** | Cellpose-SAM architecture (`cellpose.vit.CPSAM`) | encoder from original SAM ViT-L (`sam_vit_l_0b3195.pth`) | trained here; never initialised from a Cellpose checkpoint |
+
+Student initial weights: `models/student_init/sam_vit_l_0b3195.pth` (DVC), downloaded from
+`https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth`, 1 249 524 607 bytes,
+SHA-256 `3adcc4315b642a4d2101128f611684e8734c41232a17c648ed1693702a49a622` (MD5 starts with
+`0b3195`, as in the file name). `CPSAM.load_pretrained()` from Cellpose cannot be used (it puts
+back an unadapted SAM encoder); `histopathology_pnw.models.student.build_student_init` adapts the
+weights the way `CPSAM.__init__` does and loads them with `strict=True`.
 
 The student never starts from a Cellpose checkpoint. Those checkpoints were trained on other cell
 datasets, so using them would leak that knowledge into the student and distort AL comparisons.
@@ -84,14 +97,22 @@ the WCSS Lustre filesystem.
 
 ```
 histopathology_pnw/
-├── src/histopathology_pnw/   # Python package (preprocessing, training, AL, selectors)
-├── tests/                    # pytest, small synthetic fixtures, no real data      (planned)
+├── src/histopathology_pnw/   # Python package
+│   ├── config.py             #   per-machine paths (PNW_* env vars / .env)
+│   ├── device.py, seed.py    #   device choice (cuda → mps → cpu), seeding
+│   ├── datasets/             #   MoNuSeg reading and preprocessing
+│   ├── models/oracle.py      #   frozen Cellpose-SAM oracle
+│   ├── metrics.py            #   PQ, AJI, F1@0.5
+│   ├── fuzzy/                #   fuzzy systems (type-1 now, IT2 later)
+│   └── al/                   #   active learning loops
+├── notebooks/                # Jupyter exploration (NN_topic.ipynb), outputs stripped on commit
+├── tests/                    # pytest, small synthetic fixtures, no real data
 ├── configs/                  # experiment configs                                   (planned)
-├── data/                     # DVC-managed, git only stores *.dvc files              (planned)
+├── data/                     # DVC-managed, git only stores *.dvc files
 │   ├── raw/                  #   original downloads, never modified
 │   └── processed/            #   instance masks, manifests, splits
 ├── slurm/                    # job scripts for WCSS                                  (planned)
-├── docs/PLAN.md              # working checklist and reading list
+├── docs/                     # PLAN.md (checklist), LITERATURA.md (reading list)
 ├── dvc.yaml / params.yaml    # DVC pipeline stages and parameters                    (planned)
 ├── .dvc/config               # DVC remote configuration (committed)
 ├── pyproject.toml, uv.lock   # dependencies (uv)
@@ -152,6 +173,37 @@ uv run dvc pull
 The same code runs on all three. The device is chosen in one place (cuda → mps → cpu), and
 paths come from per-machine configuration, never from the code.
 
+## Stage 1: running tasks I1 and I3 on the Ubuntu workstation
+
+```bash
+cd <repo> && git pull && uv sync
+uv run dvc pull                  # raw MoNuSeg, oracle and SAM weights, preprocessed masks
+uv run dvc repro                 # rebuilds masks only if something changed
+uv run pytest -q                 # includes a strict-load test of the student initialisation
+```
+
+Notebooks, in order (VS Code Remote-SSH with the `.venv` kernel, or headless):
+
+| Notebook | What | Time (one GPU) |
+|---|---|---|
+| `01_monuseg_exploration` | dataset description, XML → mask, preprocessing | ~1 min |
+| `02_oracle_inference` | I1: oracle (A) and untrained Cellpose-SAM (B) vs ground truth | a few minutes |
+| `03_random_al` | I3: random-selection AL until the student reaches the oracle; set `MODE` | smoke: minutes, full: hours |
+
+```bash
+uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace \
+  --ExecutePreprocessor.timeout=-1 notebooks/02_oracle_inference.ipynb
+# notebook 03 in "full" mode: edit MODE, then run detached (survives SSH disconnect)
+mkdir -p outputs
+nohup uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace \
+  --ExecutePreprocessor.timeout=-1 notebooks/03_random_al.ipynb > outputs/al_random.log 2>&1 &
+tail -f outputs/al_random.log ~/.cellpose/run.log
+```
+
+Results go to `outputs/` (not in git): `i1/` (metrics, figures), `oracle_masks/` (cached oracle
+predictions), `al_random/<mode>/seed<k>/` (`results.csv` per round, checkpoints).
+Rerunning notebook 03 skips rounds that are already in `results.csv`.
+
 ## Common commands
 
 ```bash
@@ -176,6 +228,7 @@ After `dvc add` or `dvc repro`, commit the changed `*.dvc` / `dvc.lock` files to
 - **DVC** (`dvc[ssh]`): data versioning and pipelines
 - **Cellpose 4.x / PyTorch**: oracle and student models
 - **ruff**, **pytest**: lint, format, tests
+- **Jupyter** (`ipykernel`, kernel from `.venv`) + **nbstripout** (pre-commit): notebooks without outputs in git
 - **GitHub Actions / Dependabot**: CI and dependency updates
 
 ## Reproducibility rules

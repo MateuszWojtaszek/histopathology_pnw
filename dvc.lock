@@ -1,0 +1,20 @@
+schema: '2.0'
+stages:
+  preprocess_monuseg:
+    cmd: uv run python -m histopathology_pnw.datasets.monuseg
+    deps:
+    - path: data/raw/monuseg
+      hash: md5
+      md5: 1bd9fc37cc9a5719453cbe47792aaae4.dir
+      size: 526552257
+      nfiles: 105
+    - path: src/histopathology_pnw/datasets/monuseg.py
+      hash: md5
+      md5: e4dfeec405757f07cd8e9d150bc8267b
+      size: 7294
+    outs:
+    - path: data/processed/monuseg
+      hash: md5
+      md5: 091458e4b5a1871993581d297bf1931c.dir
+      size: 2154489
+      nfiles: 52
