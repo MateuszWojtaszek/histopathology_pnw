@@ -40,7 +40,7 @@ class RandomALConfig:
     n_epochs: int = 200
     # random 256 px crops per epoch; fixed, so every round gets the same number of steps
     nimg_per_epoch: int = 64
-    batch_size: int = 8
+    batch_size: int = 4  # float32 training: 8 needs > 12 GB VRAM, 4 fits a 16 GB GPU
     learning_rate: float = 5e-5
     weight_decay: float = 0.1
     stop_at_oracle: bool = True

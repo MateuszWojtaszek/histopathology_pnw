@@ -193,9 +193,10 @@ Notebooks, in order (VS Code Remote-SSH with the `.venv` kernel, or headless):
 ```bash
 uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace \
   --ExecutePreprocessor.timeout=-1 notebooks/02_oracle_inference.ipynb
-# notebook 03 in "full" mode: edit MODE, then run detached (survives SSH disconnect)
+# notebook 03 in "full" mode (AL_MODE, no notebook edit), detached so it survives SSH disconnect;
+# close other GPU kernels first (nvidia-smi), 16 GB VRAM needs BATCH_SIZE = 4 (the default)
 mkdir -p outputs
-nohup uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace \
+AL_MODE=full nohup uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace \
   --ExecutePreprocessor.timeout=-1 notebooks/03_random_al.ipynb > outputs/al_random.log 2>&1 &
 tail -f outputs/al_random.log ~/.cellpose/run.log
 ```
