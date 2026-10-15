@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 from cellpose.models import CellposeModel
 from cellpose.vit import CPSAM
+from torch.utils.checkpoint import checkpoint
 
 from histopathology_pnw.config import Settings
 from histopathology_pnw.device import get_device
@@ -58,3 +59,22 @@ def build_student_init(seed: int, out_path: Path) -> Path:
 
 def load_student(path: Path, device: torch.device | None = None) -> CellposeModel:
     return load_cellpose(path, device or get_device())
+
+
+def enable_gradient_checkpointing(net: CPSAM) -> None:
+    """Recompute encoder block activations in the backward pass instead of storing them.
+
+    Cellpose trains in float32 and every ViT-L block keeps several 1024x1024 attention maps per
+    head for backward, so a batch of 4 crops does not fit in 16 GB. With checkpointing only the
+    block inputs are kept (~30% slower). Only the instances' `forward` is replaced, so parameter
+    names and saved checkpoints are unchanged; without gradients (inference) nothing changes.
+    """
+    for block in net.encoder.blocks:
+        plain_forward = block.forward
+
+        def forward(x: torch.Tensor, _plain=plain_forward) -> torch.Tensor:
+            if torch.is_grad_enabled():
+                return checkpoint(_plain, x, use_reentrant=False)
+            return _plain(x)
+
+        block.forward = forward

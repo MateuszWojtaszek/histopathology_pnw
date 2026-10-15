@@ -27,7 +27,11 @@ from histopathology_pnw.device import get_device
 from histopathology_pnw.inference import predict
 from histopathology_pnw.metrics import evaluate_all, summarize
 from histopathology_pnw.models.oracle import oracle_masks
-from histopathology_pnw.models.student import build_student_init, load_student
+from histopathology_pnw.models.student import (
+    build_student_init,
+    enable_gradient_checkpointing,
+    load_student,
+)
 from histopathology_pnw.seed import set_seed
 
 
@@ -40,7 +44,9 @@ class RandomALConfig:
     n_epochs: int = 200
     # random 256 px crops per epoch; fixed, so every round gets the same number of steps
     nimg_per_epoch: int = 64
-    batch_size: int = 4  # float32 training: 8 needs > 12 GB VRAM, 4 fits a 16 GB GPU
+    batch_size: int = 4
+    # recompute encoder activations in backward: needed to fit batch 4 in 16 GB VRAM (float32)
+    gradient_checkpointing: bool = True
     learning_rate: float = 5e-5
     weight_decay: float = 0.1
     stop_at_oracle: bool = True
@@ -108,6 +114,8 @@ def run_random_al(
 
         t0 = time.time()
         student = load_student(init_path, device)
+        if cfg.gradient_checkpointing:
+            enable_gradient_checkpointing(student.net)
         checkpoint, train_losses, _ = train_seg(
             student.net,
             train_data=[images[i] for i in labeled],
