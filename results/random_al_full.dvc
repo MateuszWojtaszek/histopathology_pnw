@@ -1,0 +1,6 @@
+outs:
+- md5: 47883ca2bc889d1567909bac9d0e29fb.dir
+  size: 64190
+  nfiles: 4
+  hash: md5
+  path: random_al_full
