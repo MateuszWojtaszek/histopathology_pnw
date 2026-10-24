@@ -1,0 +1,6 @@
+outs:
+- md5: 11a171f25e2f2017a140677bd20c96ad.dir
+  size: 830808
+  nfiles: 108
+  hash: md5
+  path: random_al_multiseed
