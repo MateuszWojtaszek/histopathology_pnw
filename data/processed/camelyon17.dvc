@@ -1,0 +1,6 @@
+outs:
+- md5: b31a9214f4a0838f2d6e990a98a1890d.dir
+  size: 508475619
+  nfiles: 350
+  hash: md5
+  path: camelyon17
