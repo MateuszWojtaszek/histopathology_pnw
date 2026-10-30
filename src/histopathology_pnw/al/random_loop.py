@@ -6,7 +6,9 @@ oracle masks; MoNuSeg ground truth is used only to evaluate. Each round:
    fixed by the seed, so labelled sets are nested),
 2. a fresh student is built from the SAM initialisation (cold start, the same for every
    selector) and trained on the labelled images,
-3. the student is evaluated against ground truth on the validation images.
+3. the student is evaluated on the validation images against ground truth and against the
+   oracle masks (student-oracle agreement: the only measure available on datasets without GT,
+   so it is the one comparable across datasets).
 The loop stops when the student reaches the oracle's PQ on validation or the pool runs out.
 Each finished round is appended to `results.csv`; rerunning skips finished rounds (resume).
 """
@@ -96,6 +98,8 @@ def run_random_al(
     images = {s.image_id: read_image(s.image_path) for s in pool}
     val_images = [read_image(s.image_path) for s in val]
     val_gt = [read_mask(s) for s in val]
+    # oracle masks for val (cached): reference for the student-oracle agreement
+    val_oracle = oracle_masks(val)
     val_ids = [s.image_id for s in val]
 
     reached = cfg.stop_at_oracle and oracle_val_pq is not None
@@ -136,18 +140,25 @@ def run_random_al(
         per_image = evaluate_all(val_gt, preds, val_ids)
         per_image.to_csv(round_dir / "val_metrics.csv", index=False)
         summary = summarize(per_image)
+        per_image_oracle = evaluate_all(val_oracle, preds, val_ids)
+        per_image_oracle.to_csv(round_dir / "val_metrics_oracle.csv", index=False)
+        summary_oracle = summarize(per_image_oracle)
 
         row = {
             "n_labeled": n,
             "labeled_ids": json.dumps(labeled),
             **{f"val_{k}": v for k, v in summary.items()},
+            **{f"val_oracle_{k}": v for k, v in summary_oracle.items()},
             "final_train_loss": float(train_losses[-1]),
             "train_time_s": round(train_time, 1),
             "checkpoint": str(checkpoint),
         }
         results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
         results.to_csv(results_path, index=False)
-        print(f"round n_labeled={n}: val PQ={summary['pq']:.4f} ({train_time / 60:.1f} min)")
+        print(
+            f"round n_labeled={n}: val PQ={summary['pq']:.4f}, "
+            f"vs oracle PQ={summary_oracle['pq']:.4f} ({train_time / 60:.1f} min)"
+        )
 
         del student
         _free_memory()
