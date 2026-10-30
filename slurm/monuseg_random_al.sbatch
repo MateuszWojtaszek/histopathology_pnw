@@ -19,6 +19,7 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1  # write the log as it goes, so `tail -f` shows progress
 MODE="${MODE:-full}"
 
 echo "job $SLURM_JOB_ID task $SLURM_ARRAY_TASK_ID on $(hostname), mode $MODE, commit $(git rev-parse --short HEAD)"
