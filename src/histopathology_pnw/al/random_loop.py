@@ -11,19 +11,33 @@ oracle masks; MoNuSeg ground truth is used only to evaluate. Each round:
    so it is the one comparable across datasets).
 The loop stops when the student reaches the oracle's PQ on validation or the pool runs out.
 Each finished round is appended to `results.csv`; rerunning skips finished rounds (resume).
+
+Command line (one seed; on WCSS `slurm/monuseg_random_al.sbatch` runs one seed per array task):
+    uv run python -m histopathology_pnw.al.random_loop --mode full --seed 0
 """
 
+import argparse
 import gc
 import json
+import logging
+import os
+import platform
+import shutil
+import subprocess
+import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from importlib.metadata import version
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import torch
 from cellpose.train import train_seg
 
+from histopathology_pnw.config import ROOT, Settings
+from histopathology_pnw.datasets import monuseg
 from histopathology_pnw.datasets.monuseg import Sample, read_image, read_mask
 from histopathology_pnw.device import get_device
 from histopathology_pnw.inference import predict
@@ -52,6 +66,32 @@ class RandomALConfig:
     learning_rate: float = 5e-5
     weight_decay: float = 0.1
     stop_at_oracle: bool = True
+    # "all": keep every round's checkpoint (~1.2 GB each); "best": only the best round on val
+    keep_checkpoints: Literal["all", "best"] = "all"
+
+    def __post_init__(self) -> None:
+        if self.keep_checkpoints not in ("all", "best"):
+            raise ValueError(
+                f"keep_checkpoints must be 'all' or 'best', not {self.keep_checkpoints!r}"
+            )
+
+
+def preset(mode: str, seed: int) -> RandomALConfig:
+    """Settings of notebook 03. "smoke" only checks that everything runs (PQ stays 0: in the
+    single epoch the learning rate is still warming up); "full" has the hyperparameters of the
+    6-seed baseline of the I1/I3 report. Numerical settings (TF32) are chosen by the caller."""
+    if mode == "smoke":
+        return RandomALConfig(
+            seed=seed,
+            max_labeled=4,
+            n_epochs=1,
+            nimg_per_epoch=2,
+            batch_size=1,
+            stop_at_oracle=False,
+        )
+    if mode == "full":
+        return RandomALConfig(seed=seed)
+    raise ValueError(f"unknown mode {mode!r}")
 
 
 def round_sizes(cfg: RandomALConfig, pool_size: int) -> list[int]:
@@ -60,6 +100,29 @@ def round_sizes(cfg: RandomALConfig, pool_size: int) -> list[int]:
     if not sizes or sizes[-1] != last:
         sizes.append(last)
     return sizes
+
+
+def _round_dir(out_dir: Path, n_labeled: int) -> Path:
+    return out_dir / f"round_{n_labeled:02d}"
+
+
+def _checkpoint(out_dir: Path, n_labeled: int) -> Path:
+    # where train_seg saves (save_path=round dir, model_name="student"); built from out_dir, so
+    # it stays valid when the outputs folder moves (the absolute path in results.csv does not)
+    return _round_dir(out_dir, n_labeled) / "models" / "student"
+
+
+def prune_checkpoints(results: pd.DataFrame, out_dir: Path) -> None:
+    """Delete the checkpoints of all rounds except the best on val PQ (ties: the earlier round).
+
+    Only `round_XX/models` under `out_dir` is removed; metrics stay. The best round is the one
+    evaluated on test, so its checkpoint is the only one needed afterwards.
+    """
+    best = int(results.loc[results["val_pq"].idxmax(), "n_labeled"])
+    for n in results["n_labeled"]:
+        models = _round_dir(out_dir, int(n)) / "models"
+        if int(n) != best and models.is_dir():
+            shutil.rmtree(models)
 
 
 def _free_memory() -> None:
@@ -112,7 +175,7 @@ def run_random_al(
             print(f"round n_labeled={n}: already done, skipping")
             continue
         labeled = [s.image_id for s in order[:n]]
-        round_dir = out_dir / f"round_{n:02d}"
+        round_dir = _round_dir(out_dir, n)
         round_dir.mkdir(parents=True, exist_ok=True)
         set_seed(cfg.seed * 1000 + n)
 
@@ -155,6 +218,8 @@ def run_random_al(
         }
         results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
         results.to_csv(results_path, index=False)
+        if cfg.keep_checkpoints == "best":
+            prune_checkpoints(results, out_dir)
         print(
             f"round n_labeled={n}: val PQ={summary['pq']:.4f}, "
             f"vs oracle PQ={summary_oracle['pq']:.4f} ({train_time / 60:.1f} min)"
@@ -167,3 +232,122 @@ def run_random_al(
             break
 
     return results
+
+
+def oracle_pq(samples: list[Sample]) -> float:
+    """The oracle's PQ against ground truth on `samples` (on val: the stopping threshold)."""
+    gt = [read_mask(s) for s in samples]
+    return summarize(evaluate_all(gt, oracle_masks(samples), [s.image_id for s in samples]))["pq"]
+
+
+def evaluate_on_test(
+    results: pd.DataFrame, out_dir: Path, device: torch.device | None = None
+) -> pd.DataFrame:
+    """One evaluation on the MoNuSeg test set (14 images) of the round that is best on val.
+
+    The test set only reports the final result; it never influences a choice. Rows: student and
+    oracle against ground truth, and the student against the oracle masks.
+    """
+    best = results.loc[results["val_pq"].idxmax()]
+    test = monuseg.list_split("test")
+    ids = [s.image_id for s in test]
+    gt = [read_mask(s) for s in test]
+    oracle = oracle_masks(test)
+    student = load_student(_checkpoint(out_dir, int(best["n_labeled"])), device or get_device())
+    preds = predict(student, [read_image(s.image_path) for s in test])
+    final = pd.DataFrame(
+        {
+            "student vs GT": summarize(evaluate_all(gt, preds, ids)),
+            "oracle vs GT": summarize(evaluate_all(gt, oracle, ids)),
+            "student vs oracle": summarize(evaluate_all(oracle, preds, ids)),
+        }
+    ).T
+    final.insert(0, "n_labeled", int(best["n_labeled"]))
+    final.insert(1, "val_pq", float(best["val_pq"]))
+    return final
+
+
+def _run_info(args: argparse.Namespace, device: torch.device) -> dict:
+    """What is needed to reproduce a run: code version, environment, arguments."""
+
+    def git(*cmd: str) -> str:
+        out = subprocess.run(["git", *cmd], cwd=ROOT, capture_output=True, text=True)
+        return out.stdout.strip()
+
+    return {
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "git_commit": git("rev-parse", "HEAD"),
+        "git_dirty": bool(git("status", "--porcelain")),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "slurm_array_task_id": os.environ.get("SLURM_ARRAY_TASK_ID"),
+        "host": platform.node(),
+        "device": str(device),
+        "torch": torch.__version__,
+        "cellpose": version("cellpose"),
+        "tf32": torch.get_float32_matmul_precision() != "highest",
+        "args": vars(args),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Random-selection AL on MoNuSeg, one seed.")
+    parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="faster, needs more GPU memory (batch 4 fits in 80 GB, not in 16 GB)",
+    )
+    parser.add_argument(
+        "--no-tf32", action="store_true", help="exact float32 matmuls (TF32 is on by default)"
+    )
+    parser.add_argument("--keep-checkpoints", choices=("all", "best"), default="best")
+    args = parser.parse_args()
+
+    # Cellpose training logs (loss per epoch) to stdout, i.e. the Slurm log of this job;
+    # cellpose.io.logger_setup() would share and truncate ~/.cellpose/run.log across jobs
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s: %(message)s", stream=sys.stdout
+    )
+    if not args.no_tf32:
+        torch.set_float32_matmul_precision("high")  # TF32 where the GPU has it
+    device = get_device()
+    cfg = replace(
+        preset(args.mode, args.seed),
+        gradient_checkpointing=not args.no_gradient_checkpointing,
+        keep_checkpoints=args.keep_checkpoints,
+    )
+
+    split = monuseg.load_train_val_split()
+    by_id = monuseg.samples_by_id("train")
+    pool = [by_id[i] for i in split["train"]]
+    val = [by_id[i] for i in split["val"]]
+    if args.mode == "smoke":
+        val = val[:2]
+
+    test = monuseg.list_split("test")
+
+    out_dir = Settings().outputs_dir / "al_random" / args.mode / f"seed{args.seed}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # one line per (re)start; appending keeps earlier lines intact if a job dies while writing
+    with (out_dir / "run_info.jsonl").open("a") as f:
+        f.write(json.dumps(_run_info(args, device)) + "\n")
+    print(f"device: {device} | pool: {len(pool)} | val: {len(val)} | results: {out_dir}")
+
+    # fill the oracle cache for every image this run needs with a single oracle load
+    # (the smoke run fills it for the full array too: same pool, full val, test)
+    oracle_masks(pool + [by_id[i] for i in split["val"]] + test)
+
+    threshold = oracle_pq(val)
+    print(f"oracle PQ on val: {threshold:.4f}")
+    results = run_random_al(cfg, pool, val, out_dir, oracle_val_pq=threshold, device=device)
+    if cfg.keep_checkpoints == "best":
+        prune_checkpoints(results, out_dir)  # also after a resumed run that trained nothing
+
+    final = evaluate_on_test(results, out_dir, device)
+    final.to_csv(out_dir / "final_test.csv")
+    print(final.round(4).to_string())
+
+
+if __name__ == "__main__":
+    main()

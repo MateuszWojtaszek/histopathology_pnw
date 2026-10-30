@@ -4,6 +4,8 @@ Weights: `models/oracle/cpsam` (DVC), from huggingface.co/mouseland/cellpose-sam
 7c61431b5fbb078f3296754bd15d9f51b320f837. Never load it by name and never use `cpsam_v2`.
 """
 
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -45,5 +47,10 @@ def oracle_masks(
         model = model or load_oracle()
         preds = predict(model, [read_image(samples[i].image_path) for i in todo])
         for i, mask in zip(todo, preds, strict=True):
-            tifffile.imwrite(paths[i], mask, compression="zlib")
+            # write a uniquely named file, then rename: parallel jobs (Slurm array, possibly on
+            # different nodes of a shared filesystem) never read or share a half-written file
+            fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=f".{paths[i].stem}.", suffix=".tif")
+            os.close(fd)
+            tifffile.imwrite(tmp, mask, compression="zlib")
+            Path(tmp).replace(paths[i])
     return [tifffile.imread(p) for p in paths]

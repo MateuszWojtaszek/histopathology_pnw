@@ -111,7 +111,7 @@ histopathology_pnw/
 ├── data/                     # DVC-managed, git only stores *.dvc files
 │   ├── raw/                  #   original downloads, never modified
 │   └── processed/            #   instance masks, manifests, splits
-├── slurm/                    # job scripts for WCSS                                  (planned)
+├── slurm/                    # job scripts for WCSS
 ├── docs/                     # PLAN.md (checklist), LITERATURA.md (reading list)
 ├── dvc.yaml / params.yaml    # DVC pipeline stages and parameters                    (planned)
 ├── .dvc/config               # DVC remote configuration (committed)
@@ -204,6 +204,31 @@ tail -f outputs/al_random.log ~/.cellpose/run.log
 Results go to `outputs/` (not in git): `i1/` (metrics, figures), `oracle_masks/` (cached oracle
 predictions), `al_random/<mode>/seed<k>/` (`results.csv` per round, checkpoints).
 Rerunning notebook 03 skips rounds that are already in `results.csv`.
+
+## Random AL on WCSS (Slurm)
+
+The loop of notebook 03 also runs from the command line, one seed per process:
+`uv run python -m histopathology_pnw.al.random_loop --mode {smoke,full} --seed <k>`. Same
+hyperparameters as the notebook; on top of that it writes `final_test.csv` (best round on val,
+evaluated once on test) and `run_info.jsonl` (commit, Slurm job, versions, one line per start).
+`slurm/monuseg_random_al.sbatch` runs seeds 0–5 as a job array on H100s, without gradient
+checkpointing (80 GB is enough; same gradients) and keeps only the checkpoint of the best round
+on val. TF32 is on by default (`--no-tf32` turns it off), so runs are not bit-identical to the
+float32 baseline from the workstation: small differences in PQ can come from numerics alone.
+
+On the login node, after the one-time setup from "On WCSS itself":
+```bash
+cd ~/histopathology_pnw && git pull && uv sync
+grep -q PNW_OUTPUTS_DIR .env 2>/dev/null || echo "PNW_OUTPUTS_DIR=$PD/mateusz/outputs" >> .env   # results on PD
+uv run dvc pull                                       # data and weights; compute nodes may have no network
+mkdir -p $PD/mateusz/logs
+MODE=smoke sbatch --array=0 --time=00:30:00 -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch
+sbatch -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch   # all 6 seeds
+squeue --me
+```
+Results: `$PD/mateusz/outputs/al_random/<mode>/seed<k>/` (`results.csv`, `final_test.csv`).
+A task killed at the time limit resumes from the last finished round when submitted again,
+e.g. `sbatch --array=3 ...`.
 
 ## Common commands
 
