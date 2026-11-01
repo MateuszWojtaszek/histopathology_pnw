@@ -8,8 +8,11 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "boto3>=1.43.118",
     "cellpose>=4.2,<5",
     "numpy>=2.5.3",
+    "openslide-bin>=4.0.1.2",
+    "openslide-python>=1.4.7",
     "pandas>=3.0.6",
     "pydantic-settings>=2.15.0",
     "scikit-image>=0.26.0",
