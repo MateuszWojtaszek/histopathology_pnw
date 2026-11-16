@@ -92,6 +92,9 @@ ignore = [
     "E501",
 ] # długość linii pilnuje formatter; długie napisy i komentarze są OK
 
+# znaki matematyczne w opisach i etykietach wykresów (RUF001-RUF003)
+allowed-confusables = ["∪", "−"]
+
 [tool.ruff.lint.per-file-ignores]
 # notebooki: gołe wyrażenie na końcu komórki wyświetla wynik (B018),
 # a importy bywają w dalszych komórkach (E402)

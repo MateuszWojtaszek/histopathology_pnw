@@ -4,7 +4,12 @@ from scipy import ndimage as ndi
 from skimage.draw import disk
 
 from histopathology_pnw.uncertainty.tta import (
-    D4, D4_SMALL, TTAPrediction, match_version, nucleus_uncertainty, predict_tta,
+    D4,
+    D4_SMALL,
+    TTAPrediction,
+    match_version,
+    nucleus_uncertainty,
+    predict_tta,
 )
 
 

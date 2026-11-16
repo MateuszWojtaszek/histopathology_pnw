@@ -76,8 +76,12 @@ class TTAPrediction:
     cellprob: list[np.ndarray]  # float32 logits
 
     def save(self, path) -> None:
-        np.savez_compressed(path, names=np.array(self.names), masks=np.stack(self.masks),
-                            cellprob=np.stack(self.cellprob))
+        np.savez_compressed(
+            path,
+            names=np.array(self.names),
+            masks=np.stack(self.masks),
+            cellprob=np.stack(self.cellprob),
+        )
 
     @classmethod
     def load(cls, path) -> "TTAPrediction":
@@ -85,8 +89,13 @@ class TTAPrediction:
         return cls(list(d["names"]), list(d["masks"]), list(d["cellprob"]))
 
 
-def predict_tta(model, image: np.ndarray, symmetries: Sequence[Symmetry] = D4, batch_size: int = 8,
-                eval_kwargs: dict | None = None) -> TTAPrediction:
+def predict_tta(
+    model,
+    image: np.ndarray,
+    symmetries: Sequence[Symmetry] = D4,
+    batch_size: int = 8,
+    eval_kwargs: dict | None = None,
+) -> TTAPrediction:
     """Run `model.eval` (a CellposeModel) on every version of `image` (H x W x C) and map back.
 
     The first symmetry must be the identity: its prediction is the reference.
@@ -103,7 +112,9 @@ def predict_tta(model, image: np.ndarray, symmetries: Sequence[Symmetry] = D4, b
         cp = np.asarray(flows[2], dtype=np.float32)  # cellprob logits (cellpose 4: flows[2])
         m = np.asarray(m)
         if cp.shape != m.shape:
-            raise ValueError(f"cellprob {cp.shape} != mask {m.shape}; check `flows` of this cellpose version")
+            raise ValueError(
+                f"cellprob {cp.shape} != mask {m.shape}; check `flows` of this cellpose version"
+            )
         names.append(s.name)
         masks.append(s.inverse(m).astype(np.int32))
         probs.append(s.inverse(cp))
@@ -131,12 +142,22 @@ def match_version(ref: np.ndarray, other: np.ndarray, alpha: float = 0.2) -> dic
     inter = inter[1:, 1:].astype(float)
     n, m = inter.shape
     if n == 0:
-        return {"best_iou": np.zeros(0), "matched": np.zeros(0, bool), "split": np.zeros(0, bool),
-                "merge": np.zeros(0, bool), "n_extra": int(m)}
+        return {
+            "best_iou": np.zeros(0),
+            "matched": np.zeros(0, bool),
+            "split": np.zeros(0, bool),
+            "merge": np.zeros(0, bool),
+            "n_extra": int(m),
+        }
     if m == 0:
         z = np.zeros(n)
-        return {"best_iou": z, "matched": z.astype(bool), "split": z.astype(bool),
-                "merge": z.astype(bool), "n_extra": 0}
+        return {
+            "best_iou": z,
+            "matched": z.astype(bool),
+            "split": z.astype(bool),
+            "merge": z.astype(bool),
+            "n_extra": 0,
+        }
     union = area_ref[:, None] + area_oth[None, :] - inter
     iou = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
     best = iou.max(axis=1)
@@ -146,8 +167,13 @@ def match_version(ref: np.ndarray, other: np.ndarray, alpha: float = 0.2) -> dic
     covers_ref = (cov >= alpha).sum(axis=0)  # how many reference nuclei each Q_j covers
     merge = (inter.max(axis=1) > 0) & (covers_ref[j_main] >= 2)
     on_ref = inter.sum(axis=0) / np.maximum(area_oth, 1)  # share of Q_j lying on reference nuclei
-    return {"best_iou": best, "matched": best > 0.5, "split": split, "merge": merge,
-            "n_extra": int((on_ref < alpha).sum())}
+    return {
+        "best_iou": best,
+        "matched": best > 0.5,
+        "split": split,
+        "merge": merge,
+        "n_extra": int((on_ref < alpha).sum()),
+    }
 
 
 # ---- pixel uncertainty helpers ----------------------------------------------------------------
@@ -158,8 +184,9 @@ def binary_entropy(p: np.ndarray) -> np.ndarray:
 
 def boundary_band(mask: np.ndarray, ring: int = 2) -> np.ndarray:
     """Label image of the band of +-ring pixels around each nucleus boundary (0 elsewhere)."""
-    inner = binary_dilation(find_boundaries(mask, mode="inner"),
-                            structure=disk(max(ring - 1, 0)).astype(bool)) & (mask > 0)
+    inner = binary_dilation(
+        find_boundaries(mask, mode="inner"), structure=disk(max(ring - 1, 0)).astype(bool)
+    ) & (mask > 0)
     outer = expand_labels(mask, ring)
     outer[mask > 0] = 0
     return np.where(inner, mask, outer)
@@ -173,7 +200,9 @@ def per_label_mean(labels: np.ndarray, values: np.ndarray, n: int) -> np.ndarray
 
 
 # ---- per-nucleus uncertainty ------------------------------------------------------------------
-def nucleus_uncertainty(pred: TTAPrediction, alpha: float = 0.2, ring: int = 2) -> tuple[pd.DataFrame, dict]:
+def nucleus_uncertainty(
+    pred: TTAPrediction, alpha: float = 0.2, ring: int = 2
+) -> tuple[pd.DataFrame, dict]:
     """One row per reference nucleus with D, K, Top (and its parts), U_TTA, U_H, U_MI; plus image stats."""
     ref = pred.masks[0]
     n = int(ref.max())
@@ -197,19 +226,21 @@ def nucleus_uncertainty(pred: TTAPrediction, alpha: float = 0.2, ring: int = 2) 
 
     labels = np.arange(1, n + 1)
     area = np.bincount(ref.ravel(), minlength=n + 1)[1:]
-    df = pd.DataFrame({
-        "label": labels,
-        "area": area,
-        "D": matched.mean(axis=0),
-        "K": K,
-        "Top": (split | merge).mean(axis=0),
-        "split_rate": split.mean(axis=0),
-        "merge_rate": merge.mean(axis=0),
-        "mean_best_iou": best.mean(axis=0),
-        "U_TTA": per_label_mean(band, var, n),
-        "U_H": per_label_mean(band, binary_entropy(p[0]), n),
-        "U_MI": per_label_mean(band, h_mean - mean_h, n),
-    })
+    df = pd.DataFrame(
+        {
+            "label": labels,
+            "area": area,
+            "D": matched.mean(axis=0),
+            "K": K,
+            "Top": (split | merge).mean(axis=0),
+            "split_rate": split.mean(axis=0),
+            "merge_rate": merge.mean(axis=0),
+            "mean_best_iou": best.mean(axis=0),
+            "U_TTA": per_label_mean(band, var, n),
+            "U_H": per_label_mean(band, binary_entropy(p[0]), n),
+            "U_MI": per_label_mean(band, h_mean - mean_h, n),
+        }
+    )
     stats = {
         "n_nuclei": n,
         "n_versions": T,
@@ -220,8 +251,15 @@ def nucleus_uncertainty(pred: TTAPrediction, alpha: float = 0.2, ring: int = 2) 
     return df, stats
 
 
-def tta_uncertainty(model, image: np.ndarray, symmetries: Sequence[Symmetry] = D4, alpha: float = 0.2,
-                    ring: int = 2, batch_size: int = 8, eval_kwargs: dict | None = None):
+def tta_uncertainty(
+    model,
+    image: np.ndarray,
+    symmetries: Sequence[Symmetry] = D4,
+    alpha: float = 0.2,
+    ring: int = 2,
+    batch_size: int = 8,
+    eval_kwargs: dict | None = None,
+):
     """Predict all versions and compute per-nucleus uncertainty. Returns (df, stats, pred)."""
     t0 = time.time()
     pred = predict_tta(model, image, symmetries, batch_size, eval_kwargs)
