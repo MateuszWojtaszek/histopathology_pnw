@@ -1,19 +1,23 @@
-"""Active learning loop with random image selection (task I3).
+"""Active learning loop: random image selection (task I3) and other selectors.
 
 Simulation: the oracle annotates the images that are queried, so the student is trained on
 oracle masks; MoNuSeg ground truth is used only to evaluate. Each round:
-1. the labelled set grows by `step` images drawn at random (the draw order is one permutation
-   fixed by the seed, so labelled sets are nested),
-2. a fresh student is built from the SAM initialisation (cold start, the same for every
+1. a fresh student is built from the SAM initialisation (cold start, the same for every
    selector) and trained on the labelled images,
-3. the student is evaluated on the validation images against ground truth and against the
+2. the student is evaluated on the validation images against ground truth and against the
    oracle masks (student-oracle agreement: the only measure available on datasets without GT,
-   so it is the one comparable across datasets).
+   so it is the one comparable across datasets),
+3. the selector (`al/selectors.py`) scores the unlabelled images and the `step` best join the
+   labelled set of the next round.
+Every selector starts from the same first `initial` images of the seed's permutation of the
+pool. With the random selector the labelled sets are the nested sets `order[:n]`.
 The loop stops when the student reaches the oracle's PQ on validation or the pool runs out.
 Each finished round is appended to `results.csv`; rerunning skips finished rounds (resume).
 
 Command line (one seed; on WCSS `slurm/monuseg_random_al.sbatch` runs one seed per array task):
     uv run python -m histopathology_pnw.al.random_loop --mode full --seed 0
+    uv run python -m histopathology_pnw.al.random_loop --mode full --seed 0 \
+        --selector oracle_peek --max-labeled 12 --keep-checkpoints all
 """
 
 import argparse
@@ -36,12 +40,14 @@ import pandas as pd
 import torch
 from cellpose.train import train_seg
 
+from histopathology_pnw.al.selectors import SELECTORS, oracle_peek_scores, pick, random_scores
 from histopathology_pnw.config import ROOT, Settings
 from histopathology_pnw.datasets import monuseg
 from histopathology_pnw.datasets.monuseg import Sample, read_image, read_mask
 from histopathology_pnw.device import get_device
 from histopathology_pnw.inference import predict
 from histopathology_pnw.metrics import evaluate_all, summarize
+from histopathology_pnw.models import sha256
 from histopathology_pnw.models.oracle import oracle_masks
 from histopathology_pnw.models.student import (
     build_student_init,
@@ -68,8 +74,12 @@ class RandomALConfig:
     stop_at_oracle: bool = True
     # "all": keep every round's checkpoint (~1.2 GB each); "best": only the best round on val
     keep_checkpoints: Literal["all", "best"] = "all"
+    # how the next images are chosen, see al/selectors.py ("oracle_peek" is a diagnostic)
+    selector: Literal["random", "oracle_peek"] = "random"
 
     def __post_init__(self) -> None:
+        if self.selector not in SELECTORS:
+            raise ValueError(f"selector must be one of {SELECTORS}, not {self.selector!r}")
         if self.keep_checkpoints not in ("all", "best"):
             raise ValueError(
                 f"keep_checkpoints must be 'all' or 'best', not {self.keep_checkpoints!r}"
@@ -125,6 +135,37 @@ def prune_checkpoints(results: pd.DataFrame, out_dir: Path) -> None:
             shutil.rmtree(models)
 
 
+def resume_state(results: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Labelled ids of the last finished round and the ids it selected for the next one.
+
+    The selection is empty when the last round was the final one of that run, and for results
+    written before selectors existed (no `selected_next` column); it is then computed again.
+    """
+    last = results.iloc[-1]
+    labeled = json.loads(last["labeled_ids"])
+    if "selected_next" not in results.columns:
+        return labeled, []
+    return labeled, json.loads(last["selected_next"])
+
+
+def select_next(
+    cfg: RandomALConfig,
+    student,
+    labeled: list[str],
+    k: int,
+    rank: dict[str, int],
+    images: dict[str, np.ndarray],
+    labels: dict[str, np.ndarray],
+) -> tuple[list[str], pd.DataFrame]:
+    """Score every unlabelled image with the configured selector and choose `k` of them."""
+    unlabeled = sorted(set(rank) - set(labeled), key=rank.__getitem__)
+    if cfg.selector == "oracle_peek":
+        scores = oracle_peek_scores(student, unlabeled, images, labels)
+    else:
+        scores = random_scores(unlabeled, rank)
+    return pick(scores, k, rank)
+
+
 def _free_memory() -> None:
     gc.collect()
     if torch.cuda.is_available():
@@ -141,7 +182,7 @@ def run_random_al(
     oracle_val_pq: float | None = None,
     device: torch.device | None = None,
 ) -> pd.DataFrame:
-    """Run (or resume) one random-selection AL experiment; return one row per round."""
+    """Run (or resume) one AL experiment with `cfg.selector`; return one row per round."""
     device = device or get_device()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -151,6 +192,7 @@ def run_random_al(
 
     rng = np.random.default_rng(cfg.seed)
     order = [pool[i] for i in rng.permutation(len(pool))]
+    rank = {s.image_id: r for r, s in enumerate(order)}
 
     init_path = out_dir / "student_init.pth"
     if not init_path.is_file():
@@ -170,11 +212,26 @@ def run_random_al(
         print("student already reached the oracle in a previous run; nothing to do")
         return results
 
-    for n in round_sizes(cfg, len(pool)):
+    sizes = round_sizes(cfg, len(pool))
+    labeled: list[str] = []
+    selected = [s.image_id for s in order[: cfg.initial]]  # joins the labelled set next round
+    if len(results):
+        labeled, selected = resume_state(results)
+    for idx, n in enumerate(sizes):
         if n in done:
             print(f"round n_labeled={n}: already done, skipping")
             continue
-        labeled = [s.image_id for s in order[:n]]
+        if not selected:  # resumed after a run's final round, which selected nothing
+            previous = None
+            if cfg.selector != "random":  # the selector needs the student of that round
+                previous = load_student(_checkpoint(out_dir, len(labeled)), device)
+            selected, _ = select_next(
+                cfg, previous, labeled, n - len(labeled), rank, images, labels
+            )
+            del previous
+        labeled = labeled + selected
+        if len(labeled) != n or len(set(labeled)) != n:
+            raise RuntimeError(f"round n_labeled={n}: labelled set has {len(labeled)} images")
         round_dir = _round_dir(out_dir, n)
         round_dir.mkdir(parents=True, exist_ok=True)
         set_seed(cfg.seed * 1000 + n)
@@ -207,9 +264,15 @@ def run_random_al(
         per_image_oracle.to_csv(round_dir / "val_metrics_oracle.csv", index=False)
         summary_oracle = summarize(per_image_oracle)
 
+        # scores of all unlabelled images (also after the last round: they describe the pool)
+        k = sizes[idx + 1] - n if idx + 1 < len(sizes) else 0
+        selected, selection = select_next(cfg, student, labeled, k, rank, images, labels)
+        selection.to_csv(round_dir / "selection.csv", index=False)
+
         row = {
             "n_labeled": n,
             "labeled_ids": json.dumps(labeled),
+            "selected_next": json.dumps(selected),
             **{f"val_{k}": v for k, v in summary.items()},
             **{f"val_oracle_{k}": v for k, v in summary_oracle.items()},
             "final_train_loss": float(train_losses[-1]),
@@ -232,6 +295,11 @@ def run_random_al(
             break
 
     return results
+
+
+def baseline_init_path(mode: str, seed: int) -> Path:
+    """`student_init.pth` of the random run with the same mode and seed."""
+    return Settings().outputs_dir / "al_random" / mode / f"seed{seed}" / "student_init.pth"
 
 
 def oracle_pq(samples: list[Sample]) -> float:
@@ -267,7 +335,7 @@ def evaluate_on_test(
     return final
 
 
-def _run_info(args: argparse.Namespace, device: torch.device) -> dict:
+def _run_info(args: argparse.Namespace, device: torch.device, init_path: Path) -> dict:
     """What is needed to reproduce a run: code version, environment, arguments."""
 
     def git(*cmd: str) -> str:
@@ -285,12 +353,13 @@ def _run_info(args: argparse.Namespace, device: torch.device) -> dict:
         "torch": torch.__version__,
         "cellpose": version("cellpose"),
         "tf32": torch.get_float32_matmul_precision() != "highest",
+        "student_init_sha256": sha256(init_path) if init_path.is_file() else None,
         "args": vars(args),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Random-selection AL on MoNuSeg, one seed.")
+    parser = argparse.ArgumentParser(description="AL on MoNuSeg with one selector, one seed.")
     parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -302,6 +371,10 @@ def main() -> None:
         "--no-tf32", action="store_true", help="exact float32 matmuls (TF32 is on by default)"
     )
     parser.add_argument("--keep-checkpoints", choices=("all", "best"), default="best")
+    parser.add_argument("--selector", choices=SELECTORS, default="random")
+    parser.add_argument(
+        "--max-labeled", type=int, default=None, help="last round (default: the mode's preset)"
+    )
     args = parser.parse_args()
 
     # Cellpose training logs (loss per epoch) to stdout, i.e. the Slurm log of this job;
@@ -316,7 +389,10 @@ def main() -> None:
         preset(args.mode, args.seed),
         gradient_checkpointing=not args.no_gradient_checkpointing,
         keep_checkpoints=args.keep_checkpoints,
+        selector=args.selector,
     )
+    if args.max_labeled is not None:
+        cfg = replace(cfg, max_labeled=args.max_labeled)
 
     split = monuseg.load_train_val_split()
     by_id = monuseg.samples_by_id("train")
@@ -327,11 +403,19 @@ def main() -> None:
 
     test = monuseg.list_split("test")
 
-    out_dir = Settings().outputs_dir / "al_random" / args.mode / f"seed{args.seed}"
+    out_dir = Settings().outputs_dir / f"al_{cfg.selector}" / args.mode / f"seed{args.seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # paired comparison: start from the very file the random run of this seed started from
+    baseline_init = baseline_init_path(args.mode, args.seed)
+    init_path = out_dir / "student_init.pth"
+    if cfg.selector != "random" and not init_path.is_file() and baseline_init.is_file():
+        partial = init_path.with_suffix(".partial")  # never leave a half-copied init behind
+        shutil.copyfile(baseline_init, partial)
+        partial.replace(init_path)
+        print(f"student init copied from {baseline_init}")
     # one line per (re)start; appending keeps earlier lines intact if a job dies while writing
     with (out_dir / "run_info.jsonl").open("a") as f:
-        f.write(json.dumps(_run_info(args, device)) + "\n")
+        f.write(json.dumps(_run_info(args, device, init_path)) + "\n")
     print(f"device: {device} | pool: {len(pool)} | val: {len(val)} | results: {out_dir}")
 
     # fill the oracle cache for every image this run needs with a single oracle load
@@ -343,6 +427,11 @@ def main() -> None:
     results = run_random_al(cfg, pool, val, out_dir, oracle_val_pq=threshold, device=device)
     if cfg.keep_checkpoints == "best":
         prune_checkpoints(results, out_dir)  # also after a resumed run that trained nothing
+
+    if cfg.selector == "oracle_peek":
+        # a diagnostic that reads pool labels is not a method: it gets no test-set evaluation
+        print("oracle_peek: test set not evaluated")
+        return
 
     final = evaluate_on_test(results, out_dir, device)
     final.to_csv(out_dir / "final_test.csv")
