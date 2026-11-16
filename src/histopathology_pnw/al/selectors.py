@@ -10,6 +10,10 @@ so the scores can be analysed afterwards.
   which a real selector never sees, and queries the images on which the current student agrees
   least with the oracle (lowest PQ). It bounds what any "query the hardest images" selector can
   gain over random.
+- "tta_kd": model uncertainty from test-time augmentation (`uncertainty/tta.py`), no labels. Per
+  image: `K_mean` (mean contour instability of its nuclei) and `unstable` (share of nuclei not
+  found in every version, plus extra nuclei that appear only in other versions). The score is
+  the mean of the two percentile ranks within the unlabelled pool.
 """
 
 import numpy as np
@@ -18,8 +22,9 @@ from cellpose.models import CellposeModel
 
 from histopathology_pnw.inference import predict
 from histopathology_pnw.metrics import panoptic_quality
+from histopathology_pnw.uncertainty import tta
 
-SELECTORS = ("random", "oracle_peek")
+SELECTORS = ("random", "oracle_peek", "tta_kd")
 
 
 def random_scores(unlabeled: list[str], rank: dict[str, int]) -> pd.DataFrame:
@@ -60,6 +65,54 @@ def oracle_peek_scores(
     """Segment the unlabelled images with the current student and compare with the oracle."""
     preds = predict(student, [images[i] for i in unlabeled], progress=False)
     return peek_table(unlabeled, preds, [labels[i] for i in unlabeled])
+
+
+def tta_image_row(nuclei: pd.DataFrame, stats: dict) -> dict:
+    """Image-level TTA measures from the per-nucleus table of `tta.nucleus_uncertainty`.
+
+    An image on which the student finds no nucleus gets the highest instability: nothing was
+    segmented, so nothing is known to be stable.
+    """
+    if len(nuclei) == 0:
+        return {"n_pred": 0, "K_mean": 1.0, "low_D": 1.0, "E_extra": stats["E_extra"]}
+    return {
+        "n_pred": len(nuclei),
+        "K_mean": float(nuclei["K"].mean()),
+        "low_D": float((nuclei["D"] < 1).mean()),
+        "E_extra": stats["E_extra"],
+    }
+
+
+def combine_tta(table: pd.DataFrame) -> pd.DataFrame:
+    """Add `unstable` = low_D + E_extra and `score` = mean percentile rank of K_mean and unstable."""
+    table = table.assign(unstable=table["low_D"] + table["E_extra"])
+    ranks = table[["K_mean", "unstable"]].rank(pct=True)
+    return table.assign(
+        rank_K=ranks["K_mean"], rank_unstable=ranks["unstable"], score=ranks.mean(axis=1)
+    )
+
+
+def tta_kd_scores(
+    student: CellposeModel,
+    unlabeled: list[str],
+    images: dict[str, np.ndarray],
+    labels: dict[str, np.ndarray] | None = None,
+    eval_kwargs: dict | None = None,
+) -> pd.DataFrame:
+    """Score = mean rank of contour instability and detection instability under D4 TTA.
+
+    `labels` (oracle masks) are NOT used for the score. When given, the student's PQ against
+    them is stored as `pq_oracle_offline`, for analysis after the run only.
+    """
+    rows = []
+    for image_id in unlabeled:
+        pred = tta.predict_tta(student, images[image_id], eval_kwargs=eval_kwargs)
+        nuclei, stats = tta.nucleus_uncertainty(pred)
+        row = {"image_id": image_id, **tta_image_row(nuclei, stats)}
+        if labels is not None:
+            row["pq_oracle_offline"] = panoptic_quality(labels[image_id], pred.masks[0])["pq"]
+        rows.append(row)
+    return combine_tta(pd.DataFrame(rows))
 
 
 def pick(scores: pd.DataFrame, k: int, rank: dict[str, int]) -> tuple[list[str], pd.DataFrame]:

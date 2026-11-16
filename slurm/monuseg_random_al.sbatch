@@ -4,6 +4,7 @@
 #   sbatch -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch
 #   MODE=smoke sbatch --array=0 --time=00:30:00 -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch
 # Other selector, fewer rounds, every round's checkpoint kept (SELECTOR, MAX_LABELED, KEEP):
+#   SELECTOR=tta_kd MAX_LABELED=12 KEEP=all sbatch --time=02:00:00 -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch
 #   SELECTOR=oracle_peek MAX_LABELED=12 KEEP=all sbatch --time=02:00:00 -o "$PD/mateusz/logs/%x-%A_%a.log" slurm/monuseg_random_al.sbatch
 # Results go to $PNW_OUTPUTS_DIR/al_<selector>/<mode>/seed<k> (set in .env). A job killed at the
 # time limit resumes from the last finished round when the same task is submitted again.

@@ -18,6 +18,7 @@ Command line (one seed; on WCSS `slurm/monuseg_random_al.sbatch` runs one seed p
     uv run python -m histopathology_pnw.al.random_loop --mode full --seed 0
     uv run python -m histopathology_pnw.al.random_loop --mode full --seed 0 \
         --selector oracle_peek --max-labeled 12 --keep-checkpoints all
+(`--selector tta_kd` for the TTA uncertainty selector.)
 """
 
 import argparse
@@ -40,7 +41,13 @@ import pandas as pd
 import torch
 from cellpose.train import train_seg
 
-from histopathology_pnw.al.selectors import SELECTORS, oracle_peek_scores, pick, random_scores
+from histopathology_pnw.al.selectors import (
+    SELECTORS,
+    oracle_peek_scores,
+    pick,
+    random_scores,
+    tta_kd_scores,
+)
 from histopathology_pnw.config import ROOT, Settings
 from histopathology_pnw.datasets import monuseg
 from histopathology_pnw.datasets.monuseg import Sample, read_image, read_mask
@@ -75,7 +82,7 @@ class RandomALConfig:
     # "all": keep every round's checkpoint (~1.2 GB each); "best": only the best round on val
     keep_checkpoints: Literal["all", "best"] = "all"
     # how the next images are chosen, see al/selectors.py ("oracle_peek" is a diagnostic)
-    selector: Literal["random", "oracle_peek"] = "random"
+    selector: Literal["random", "oracle_peek", "tta_kd"] = "random"
 
     def __post_init__(self) -> None:
         if self.selector not in SELECTORS:
@@ -161,6 +168,8 @@ def select_next(
     unlabeled = sorted(set(rank) - set(labeled), key=rank.__getitem__)
     if cfg.selector == "oracle_peek":
         scores = oracle_peek_scores(student, unlabeled, images, labels)
+    elif cfg.selector == "tta_kd":
+        scores = tta_kd_scores(student, unlabeled, images, labels)
     else:
         scores = random_scores(unlabeled, rank)
     return pick(scores, k, rank)
@@ -428,9 +437,10 @@ def main() -> None:
     if cfg.keep_checkpoints == "best":
         prune_checkpoints(results, out_dir)  # also after a resumed run that trained nothing
 
-    if cfg.selector == "oracle_peek":
-        # a diagnostic that reads pool labels is not a method: it gets no test-set evaluation
-        print("oracle_peek: test set not evaluated")
+    if cfg.selector != "random":
+        # the test set reports final results only: selectors under development (and the
+        # oracle_peek diagnostic, which reads pool labels) are compared on validation
+        print(f"{cfg.selector}: test set not evaluated")
         return
 
     final = evaluate_on_test(results, out_dir, device)

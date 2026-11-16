@@ -100,3 +100,42 @@ def test_extending_a_finished_run_continues_from_its_last_round(fake_models, tmp
     run_random_al(_cfg("oracle_peek", 4), pool, val, tmp_path / "parts")
     parts = run_random_al(_cfg("oracle_peek", 6), pool, val, tmp_path / "parts")
     assert _labeled(parts) == _labeled(whole)
+
+
+def test_tta_selector_runs_in_the_loop_and_logs_its_scores(fake_models, monkeypatch, tmp_path):
+    class Blobs:
+        net = None
+
+        def eval(self, img, batch_size=8, **kwargs):
+            mask = (img[..., 0] * img[..., 1]).astype(np.int32)
+            return mask, [None, None, np.where(mask > 0, 4.0, -4.0).astype(np.float32)], None
+
+    monkeypatch.setattr(random_loop, "load_student", lambda path, device: Blobs())
+    monkeypatch.setattr(
+        random_loop, "predict", lambda model, images, **kw: _fake_predict(model, images)
+    )
+    monkeypatch.setattr(selectors.tta, "predict_tta", _plain_predict_tta(selectors.tta.predict_tta))
+    pool, val = _samples(8), _samples(2, "val")
+    order = [pool[i].image_id for i in np.random.default_rng(0).permutation(len(pool))]
+
+    results = run_random_al(_cfg("tta_kd", 6), pool, val, tmp_path / "tta")
+    sets = _labeled(results)
+    assert sets[0] == order[:2] and [len(s) for s in sets] == [2, 4, 6]
+    hard_left = [i for i in order if i in HARD and i not in order[:2]]
+    assert set(sets[1][2:]) == set(hard_left[:2])  # nothing segmented = most unstable
+    table = pd.read_csv(tmp_path / "tta" / "round_02" / "selection.csv")
+    assert {
+        "K_mean",
+        "low_D",
+        "E_extra",
+        "unstable",
+        "score",
+        "pq_oracle_offline",
+        "selected",
+    } <= set(table.columns)
+    assert len(table) == 6
+
+
+def _plain_predict_tta(real):
+    # the fake student takes any image and needs no Cellpose eval settings
+    return lambda model, image, *args, **kwargs: real(model, image, eval_kwargs={})
