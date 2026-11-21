@@ -1,0 +1,6 @@
+outs:
+- md5: 3a73a6c25882bf53cab9ea5f2e34c576.dir
+  size: 3161271
+  nfiles: 8
+  hash: md5
+  path: patch_eval_seed0_n04_D4_tile250
