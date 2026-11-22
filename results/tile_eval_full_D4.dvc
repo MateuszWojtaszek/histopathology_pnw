@@ -1,0 +1,6 @@
+outs:
+- md5: a4ec5094369992e82d61135b5b4a46e2.dir
+  size: 386719
+  nfiles: 8
+  hash: md5
+  path: tile_eval_full_D4
