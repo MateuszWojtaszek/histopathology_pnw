@@ -4,3 +4,4 @@ outs:
   nfiles: 8
   hash: md5
   path: tile_eval_full_D4
+  remote: results_wcss
