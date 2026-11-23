@@ -1,4 +1,5 @@
-"""Active learning on tiles instead of whole images, random selection (the tile baseline).
+"""Active learning on tiles instead of whole images: random selection (the tile baseline) and the
+tile versions of the image selectors (`--selector oracle_peek | tta_kd`, `al/tile_selectors.py`).
 
 Same simulation and training recipe as `random_loop.py`, but the unit of annotation is a tile:
 1. pool: the training images (the frozen train/val split, never the test set) cut into 256 x 256
@@ -24,6 +25,7 @@ Each finished round is appended to `results.csv`; rerunning skips finished round
 
 import argparse
 import json
+import shutil
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
@@ -35,6 +37,12 @@ import torch
 from cellpose.train import train_seg
 
 from histopathology_pnw.al.random_loop import RandomALConfig, _free_memory, round_sizes
+from histopathology_pnw.al.tile_selectors import (
+    SELECTORS,
+    oracle_peek_tile_scores,
+    pick_tiles,
+    tta_kd_tile_scores,
+)
 from histopathology_pnw.config import Settings
 from histopathology_pnw.datasets import monuseg
 from histopathology_pnw.datasets.monuseg import Sample, read_image, read_mask
@@ -67,6 +75,12 @@ class TileALConfig(RandomALConfig):
     # marked as not annotated (foreground = -1) and left out of the loss; the budget is unchanged
     margin: int = 0
     rounds: list[int] | None = None  # train only these n_labeled (default: round_sizes)
+    # how the next tiles are chosen (al/tile_selectors.py; "oracle_peek" is a diagnostic)
+    tile_selector: str = "random"
+
+    def __post_init__(self) -> None:
+        if self.tile_selector not in SELECTORS:
+            raise ValueError(f"tile_selector must be one of {SELECTORS}")
 
 
 def tile_key(image_id: str, tile: int) -> str:
@@ -221,8 +235,26 @@ def run_tile_random_al(
     if cfg.full_image_flows:
         flows = {i: full_image_flows(m, device) for i, m in masks.items()}
     keys, tile_images, tile_masks = cut_pool(images, masks, cfg.tile, cfg.stride, flows, cfg.margin)
-    del images, masks, flows
+    del flows
+    if cfg.tile_selector == "random":
+        del images, masks  # the other selectors segment the whole pool images
     order = draw_order(keys, cfg.seed)
+    rank = {k: r for r, k in enumerate(order)}
+
+    def select_next(student, labeled: list[str], k: int) -> tuple[list[str], pd.DataFrame | None]:
+        done_tiles = set(labeled)
+        unlabeled = [t for t in order if t not in done_tiles]
+        if cfg.tile_selector == "random" or k == 0:
+            return unlabeled[:k], None
+        if cfg.tile_selector == "oracle_peek":
+            scores = oracle_peek_tile_scores(
+                student, unlabeled, images, masks, split_key, tile_key, cfg.tile, cfg.stride
+            )
+        else:
+            scores = tta_kd_tile_scores(
+                student, unlabeled, images, split_key, tile_key, masks, cfg.tile, cfg.stride
+            )
+        return pick_tiles(scores, k, rank)
 
     val_images = [read_image(s.image_path) for s in val]
     val_gt = [read_mask(s) for s in val]
@@ -238,11 +270,21 @@ def run_tile_random_al(
         print("student already reached the oracle in a previous run; nothing to do")
         return results
 
-    for n in cfg.rounds or round_sizes(cfg, len(keys)):
+    sizes = cfg.rounds or round_sizes(cfg, len(keys))
+    # every selector starts from the first `initial` tiles of the seed's permutation; random
+    # keeps the nested sets order[:n], the others add what the previous student chose
+    labeled: list[str] = []
+    selected = order[: sizes[0]]
+    if cfg.tile_selector != "random" and len(results):
+        last = results.iloc[-1]
+        labeled, selected = json.loads(last["labeled_ids"]), json.loads(last["selected_next"])
+    for idx, n in enumerate(sizes):
         if n in done:
             print(f"round n_labeled={n}: already done, skipping")
             continue
-        labeled = order[:n]
+        labeled = order[:n] if cfg.tile_selector == "random" else labeled + selected
+        if len(labeled) != n or len(set(labeled)) != n:
+            raise RuntimeError(f"round n_labeled={n}: labelled set has {len(labeled)} tiles")
         round_dir = out_dir / f"round_{n:03d}"
         round_dir.mkdir(parents=True, exist_ok=True)
         set_seed(cfg.seed * 1000 + n)
@@ -278,17 +320,26 @@ def run_tile_random_al(
         per_tile = evaluate_val_tiles(val_gt, preds, val_ids, cfg)
         per_tile.to_csv(round_dir / "val_metrics_tiles.csv", index=False)
 
+        t1 = time.time()
+        k_next = sizes[idx + 1] - n if idx + 1 < len(sizes) else 0
+        selected, selection = select_next(student, labeled, k_next)
+        if selection is not None:
+            selection.to_csv(round_dir / "selection.csv", index=False)
+        select_time = time.time() - t1
+
         row = {
             "n_labeled": n,
             "n_images_equiv": n / 16,
             "n_source_images": len({split_key(k)[0] for k in labeled}),
             "n_labeled_nuclei": sum(n_labels(tile_masks[k]) for k in labeled),
             "labeled_ids": json.dumps(labeled),
+            "selected_next": json.dumps(selected),
             **{f"val_{k}": v for k, v in summary.items()},
             **{f"val_{k}": v for k, v in summarize_tiles(per_tile).items()},
             **{f"val_oracle_{k}": v for k, v in summary_oracle.items()},
             "final_train_loss": float(train_losses[-1]),
             "train_time_s": round(train_time, 1),
+            "select_time_s": round(select_time, 1),
             "checkpoint": str(checkpoint),
         }
         results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
@@ -326,6 +377,10 @@ def main() -> None:
     parser.add_argument(
         "--margin", type=int, default=0, help="px of unannotated context (needs --full-image-flows)"
     )
+    parser.add_argument("--selector", choices=SELECTORS, default="random")
+    parser.add_argument(
+        "--init-from", type=Path, help="copy student_init.pth from this run (paired comparison)"
+    )
     parser.add_argument("--smoke", action="store_true", help="2 tiny rounds, 1 epoch (code check)")
     args = parser.parse_args()
 
@@ -352,11 +407,20 @@ def main() -> None:
             full_image_flows=args.full_image_flows,
             margin=args.margin,
             rounds=args.rounds,
+            tile_selector=args.selector,
         )
         if args.smoke:
             cfg.initial, cfg.step, cfg.max_labeled = 4, 4, 8
             cfg.n_epochs, cfg.nimg_per_epoch, cfg.batch_size = 1, 4, 2
-        run_tile_random_al(cfg, pool, val, out_root / f"seed{seed}", oracle_val_pq, device)
+        out_dir = out_root / f"seed{seed}"
+        init = out_dir / "student_init.pth"
+        if args.init_from and not init.is_file():
+            source = args.init_from / f"seed{seed}" / "student_init.pth"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, init.with_suffix(".partial"))
+            init.with_suffix(".partial").replace(init)
+            print(f"student init copied from {source}")
+        run_tile_random_al(cfg, pool, val, out_dir, oracle_val_pq, device)
 
 
 if __name__ == "__main__":
