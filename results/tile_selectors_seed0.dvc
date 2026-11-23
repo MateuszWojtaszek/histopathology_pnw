@@ -1,0 +1,7 @@
+outs:
+- md5: b1458a4229225204a0d1bc5407bd2afd.dir
+  size: 33798203
+  nfiles: 4
+  hash: md5
+  path: tile_selectors_seed0
+  remote: results_wcss
