@@ -6,7 +6,10 @@ every quantity is computed per tile. TTA itself still runs on the whole image (f
 artificial borders); only the results are split.
 
 Assignment rule (the same everywhere): an object belongs to the tile that contains its centroid,
-so a nucleus cut by a tile border is counted once and never cropped.
+so a nucleus cut by a tile border is counted once and never cropped. Tiles may overlap (`stride` <
+`size`, e.g. 256 px tiles every 248 px on a 1000 px image); a tile then owns the band
+[r * stride, (r + 1) * stride) of its row (the last one: up to the image border), so the owned
+regions still partition the image and tile counts still sum to the image counts.
 
 Per tile, from the student's predictions only (usable by a selector):
 - n_nuclei          number of reference nuclei (original prediction),
@@ -34,47 +37,67 @@ from histopathology_pnw.uncertainty.tta import TTAPrediction, overlap
 # ---- grid ------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class TileGrid:
-    """Non-overlapping square tiles covering an image; the last row/column may be smaller."""
+    """Square tiles covering an image, row-major.
+
+    `stride` = `size` (default): non-overlapping tiles, the last row/column may be smaller.
+    `stride` < `size`: overlapping tiles started every `stride` px (choose it so that the last
+    tile ends at the border, e.g. 1000 = 3 * 248 + 256).
+    """
 
     height: int
     width: int
     size: int = 250
+    stride: int | None = None  # None: = size
+
+    @property
+    def step(self) -> int:
+        return self.stride or self.size
+
+    def _n(self, length: int) -> int:
+        return 1 + max(0, -(-(length - self.size) // self.step))
 
     @property
     def n_rows(self) -> int:
-        return -(-self.height // self.size)
+        return self._n(self.height)
 
     @property
     def n_cols(self) -> int:
-        return -(-self.width // self.size)
+        return self._n(self.width)
 
     @property
     def n_tiles(self) -> int:
         return self.n_rows * self.n_cols
 
     def tile_of(self, cy: np.ndarray, cx: np.ndarray) -> np.ndarray:
-        """Tile id (row-major) of every point; -1 for NaN coordinates."""
+        """Tile id (row-major) owning every point; -1 for NaN coordinates."""
         cy, cx = np.asarray(cy, float), np.asarray(cx, float)
         ok = np.isfinite(cy) & np.isfinite(cx)
-        r = np.clip(np.floor(np.where(ok, cy, 0) / self.size), 0, self.n_rows - 1).astype(int)
-        c = np.clip(np.floor(np.where(ok, cx, 0) / self.size), 0, self.n_cols - 1).astype(int)
+        r = np.clip(np.floor(np.where(ok, cy, 0) / self.step), 0, self.n_rows - 1).astype(int)
+        c = np.clip(np.floor(np.where(ok, cx, 0) / self.step), 0, self.n_cols - 1).astype(int)
         return np.where(ok, r * self.n_cols + c, -1)
+
+    def box(self, tile: int) -> tuple[slice, slice]:
+        """Pixel box (rows, cols) of a tile, for cropping: `image[grid.box(t)]`."""
+        r, c = divmod(tile, self.n_cols)
+        y0, x0 = r * self.step, c * self.step
+        y1, x1 = min(y0 + self.size, self.height), min(x0 + self.size, self.width)
+        return slice(y0, y1), slice(x0, x1)
 
     def frame(self) -> pd.DataFrame:
         """One row per tile: tile id, row, col and its pixel box."""
         rows = []
         for t in range(self.n_tiles):
             r, c = divmod(t, self.n_cols)
-            y0, x0 = r * self.size, c * self.size
+            ys, xs = self.box(t)
             rows.append(
                 {
                     "tile": t,
                     "row": r,
                     "col": c,
-                    "y0": y0,
-                    "x0": x0,
-                    "h": min(self.size, self.height - y0),
-                    "w": min(self.size, self.width - x0),
+                    "y0": ys.start,
+                    "x0": xs.start,
+                    "h": ys.stop - ys.start,
+                    "w": xs.stop - xs.start,
                 }
             )
         return pd.DataFrame(rows)

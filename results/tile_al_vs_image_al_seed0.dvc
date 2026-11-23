@@ -1,0 +1,7 @@
+outs:
+- md5: b98fa00cefc04bc9590f802d4984f7bc.dir
+  size: 869755
+  nfiles: 10
+  hash: md5
+  path: tile_al_vs_image_al_seed0
+  remote: results_wcss

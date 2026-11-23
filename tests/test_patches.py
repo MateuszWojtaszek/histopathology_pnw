@@ -55,6 +55,18 @@ def test_grid_uneven_last_tile():
     assert f["h"].mul(f["w"]).sum() == 1001 * 600
 
 
+def test_grid_overlapping_tiles():
+    g = TileGrid(1000, 1000, 256, stride=248)
+    f = g.frame()
+    assert (g.n_rows, g.n_cols) == (4, 4)
+    assert list(f["y0"].iloc[::4]) == [0, 248, 496, 744]
+    assert (f["h"] == 256).all() and (f["w"] == 256).all()  # last tile ends at the border
+    # ownership: bands of 248 px, the last one 256 px; the 8 px overlap goes to the next tile
+    assert list(g.tile_of([247.9, 248, 743.9, 744, 999], [0] * 5)) == [0, 4, 8, 12, 12]
+    img = np.arange(1000 * 1000).reshape(1000, 1000)
+    assert img[g.box(5)].shape == (256, 256) and img[g.box(5)][0, 0] == img[248, 248]
+
+
 def test_centroids():
     m = blobs((100, 100), [(20, 30), (70, 80)])
     cy, cx = centroids(m)
